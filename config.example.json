@@ -1,0 +1,6 @@
+{
+    "caldav_url": "https://your-nextcloud-server.com/remote.php/dav",
+    "caldav_username": "your_username",
+    "caldav_password": "your_password_or_app_token",
+    "calendar_name": "My tasks"
+}

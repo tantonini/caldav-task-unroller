@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""CalDAV Task Unroller: Generates recurring tasks from CalDAV RRULE templates."""
+
+# pylint: disable=invalid-name
+
+import json
+import sys
+
+import caldav
+
+
+def load_config(config_path="config.json"):
+    """Load configuration from a JSON file."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        print(f"Error: Configuration file '{config_path}' not found.")
+        sys.exit(1)
+    except json.JSONDecodeError as err:
+        print(f"Error parsing configuration file: {err}")
+        sys.exit(1)
+
+
+def main():
+    """Main execution flow: load config and connect to server."""
+    config = load_config()
+
+    url = config.get("caldav_url")
+    user = config.get("caldav_username")
+    pwd = config.get("caldav_password")
+    cal_name = config.get("calendar_name")
+    state_file = config.get("state_file", "state.json")
+
+    if not all([url, user, pwd, cal_name]):
+        print("Error: Missing one or more required keys in config.json.")
+        sys.exit(1)
+
+    # pylint: disable=broad-exception-caught
+    try:
+        client = caldav.DAVClient(url=url, username=user, password=pwd)
+        client.principal()
+        print("Connected to CalDAV server successfully.")
+        print(f"Target calendar: '{cal_name}' | State file: '{state_file}'")
+    except Exception as err:
+        print(f"Fatal error: {err}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
