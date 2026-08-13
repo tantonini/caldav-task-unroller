@@ -3,6 +3,7 @@
 
 # pylint: disable=invalid-name
 
+import argparse
 import json
 import os
 import sys
@@ -10,6 +11,26 @@ import uuid
 from datetime import datetime, timezone
 
 import caldav
+
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Archive completed occurrences of recurring CalDAV tasks."
+    )
+    parser.add_argument(
+        "-d",
+        "--dry-run",
+        action="store_true",
+        help="Simulate execution without modifying the server or state file.",
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        default="config.json",
+        help="Path to configuration file (default: config.json).",
+    )
+    return parser.parse_args()
 
 
 def load_config(config_path="config.json"):
@@ -200,27 +221,36 @@ def detect_completed_occurrences(target_cal, state):
     return completions
 
 
-def archive_completions(target_cal, completions):
+def archive_completions(target_cal, completions, dry_run=False):
     """Push standalone COMPLETED tasks for each detected occurrence."""
     for item in completions:
-        print(f"Archiving completed occurrence: '{item['summary']}'")
-        create_completed_archive(
-            target_cal=target_cal,
-            summary=item["summary"],
-            original_due=item["original_due"],
-            completed_at=item["completed_at"],
-        )
+        if dry_run:
+            print(
+                f"[DRY-RUN] Would archive: '{item['summary']}' (Due: {item['original_due']})"
+            )
+        else:
+            print(f"Archiving completed occurrence: '{item['summary']}'")
+            create_completed_archive(
+                target_cal=target_cal,
+                summary=item["summary"],
+                original_due=item["original_due"],
+                completed_at=item["completed_at"],
+            )
 
 
 def main():
     """Main execution flow: load config, inspect tasks, update state."""
-    config = load_config()
+    args = parse_args()
+    config = load_config(args.config)
     cal_name = config.get("calendar_name")
     state_file = config.get("state_file", "state.json")
 
     if not cal_name:
         print("Error: Missing 'calendar_name' key in config.json.")
         sys.exit(1)
+
+    if args.dry_run:
+        print("=== DRY RUN MODE ENABLED (No changes will be saved) ===")
 
     # pylint: disable=broad-exception-caught
     try:
@@ -233,10 +263,13 @@ def main():
 
         completions = detect_completed_occurrences(target_cal, state)
         if completions:
-            archive_completions(target_cal, completions)
+            archive_completions(target_cal, completions, dry_run=args.dry_run)
 
-        save_state(state_file, state)
-        print("Execution completed. State saved.")
+        if not args.dry_run:
+            save_state(state_file, state)
+            print("Execution completed. State saved.")
+        else:
+            print("Dry run completed. State was NOT saved.")
 
     except Exception as err:
         print(f"Fatal error: {err}")
