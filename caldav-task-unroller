@@ -82,71 +82,91 @@ def parse_recurring_task(todo):
     }
 
 
-def main():
-    """Main execution flow: load config, inspect tasks, update state."""
-    config = load_config()
-
+def connect_caldav(config):
+    """Establish connection with the CalDAV server and return the principal."""
     url = config.get("caldav_url")
     user = config.get("caldav_username")
     pwd = config.get("caldav_password")
+
+    if not all([url, user, pwd]):
+        print("Error: Missing credentials or server URL in config.json.")
+        sys.exit(1)
+
+    client = caldav.DAVClient(url=url, username=user, password=pwd)
+    return client.principal()
+
+
+def get_calendar(principal, cal_name):
+    """Locate and return the target calendar by name."""
+    calendars = principal.calendars()
+    target_cal = next((c for c in calendars if c.get_display_name() == cal_name), None)
+
+    if not target_cal:
+        available = [c.get_display_name() for c in calendars]
+        print(f"Error: Missing required calendar '{cal_name}'.")
+        print(f"Available calendars on server: {available}")
+        sys.exit(1)
+
+    return target_cal
+
+
+def check_task_completions(target_cal, state):
+    """Scan recurring tasks and detect completed occurrences."""
+    todos = target_cal.todos()
+    recurring_count = 0
+    detected_completions = []
+
+    for todo in todos:
+        info = parse_recurring_task(todo)
+        if not info:
+            continue
+
+        recurring_count += 1
+        uid = info["uid"]
+        current_due = info["due"]
+
+        if uid in state:
+            prev_due = state[uid].get("due")
+            if prev_due and current_due != prev_due:
+                print(f"Detected completed occurrence: '{info['summary']}'")
+                print(f"  Previous DUE: {prev_due} -> New DUE: {current_due}")
+                detected_completions.append(
+                    {
+                        "summary": info["summary"],
+                        "completed_at": info["last_modified"],
+                        "original_due": prev_due,
+                    }
+                )
+
+        state[uid] = info
+
+    print(
+        f"Scanned {len(todos)} items ({recurring_count} recurring). "
+        f"Detected {len(detected_completions)} completed occurrence(s)."
+    )
+    return detected_completions
+
+
+def main():
+    """Main execution flow: load config, inspect tasks, update state."""
+    config = load_config()
     cal_name = config.get("calendar_name")
     state_file = config.get("state_file", "state.json")
 
-    if not all([url, user, pwd, cal_name]):
-        print("Error: Missing one or more required keys in config.json.")
+    if not cal_name:
+        print("Error: Missing 'calendar_name' key in config.json.")
         sys.exit(1)
 
     # pylint: disable=broad-exception-caught
     try:
-        client = caldav.DAVClient(url=url, username=user, password=pwd)
-        principal = client.principal()
-
-        calendars = principal.calendars()
-        target_cal = next((c for c in calendars if c.name == cal_name), None)
-
-        if not target_cal:
-            available = [c.name for c in calendars]
-            print(f"Error: Missing required calendar '{cal_name}'.")
-            print(f"Available calendars on server: {available}")
-            sys.exit(1)
-
-        print(f"Successfully located calendar: '{target_cal.name}'.")
+        principal = connect_caldav(config)
+        target_cal = get_calendar(principal, cal_name)
+        print(f"Successfully located calendar: '{target_cal.get_display_name()}'.")
 
         state = load_state(state_file)
         print(f"Loaded state with {len(state)} tracked tasks.")
 
-        todos = target_cal.todos()
-        recurring_count = 0
-        detected_completions = []
-
-        for todo in todos:
-            info = parse_recurring_task(todo)
-            if not info:
-                continue
-
-            recurring_count += 1
-            uid = info["uid"]
-            current_due = info["due"]
-
-            if uid in state:
-                prev_due = state[uid].get("due")
-                if prev_due and current_due != prev_due:
-                    print(f"Detected completed occurrence: '{info['summary']}'")
-                    print(f"  Previous DUE: {prev_due} -> New DUE: {current_due}")
-                    detected_completions.append(
-                        {
-                            "summary": info["summary"],
-                            "completed_at": info["last_modified"],
-                            "original_due": prev_due,
-                        }
-                    )
-
-            state[uid] = info
-
-        print(
-            f"Scanned {len(todos)} items ({recurring_count} recurring). "
-            f"Detected {len(detected_completions)} completed occurrence(s)."
-        )
+        _ = check_task_completions(target_cal, state)
 
         save_state(state_file, state)
         print("Execution completed. State saved.")
