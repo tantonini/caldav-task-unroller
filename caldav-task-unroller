@@ -88,7 +88,16 @@ def parse_recurring_task(todo):
     summary = str(vtodo.get("summary", "Untitled Task"))
 
     due_prop = vtodo.get("due")
-    due_str = due_prop.dt.isoformat() if due_prop else None
+    is_date_only = False
+    due_str = None
+
+    if due_prop:
+        dt_val = due_prop.dt
+        if isinstance(dt_val, datetime):
+            due_str = dt_val.isoformat()
+        else:
+            due_str = dt_val.isoformat()
+            is_date_only = True
 
     last_mod_prop = vtodo.get("last-modified")
     last_mod_str = last_mod_prop.dt.isoformat() if last_mod_prop else None
@@ -100,18 +109,18 @@ def parse_recurring_task(todo):
         "uid": uid,
         "summary": summary,
         "due": due_str,
+        "is_date_only": is_date_only,
         "last_modified": last_mod_str,
     }
 
 
-def format_ical_datetime(dt_str):
-    """Format an ISO date or datetime string into a valid iCalendar DATE-TIME string (UTC)."""
+def format_ical_datetime(dt_str, force_date=False):
+    """Format an ISO date or datetime string into a valid iCalendar string."""
     if not dt_str:
         return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # If simple DATE (e.g., "2026-08-11"), convert to UTC DATE-TIME at midnight
-    if len(dt_str) == 10 and "T" not in dt_str:
-        return dt_str.replace("-", "") + "T000000Z"
+    if force_date or (len(dt_str) == 10 and "T" not in dt_str):
+        return dt_str.replace("-", "")
 
     try:
         dt = datetime.fromisoformat(dt_str)
@@ -128,7 +137,7 @@ def format_ical_datetime(dt_str):
             if not clean.endswith("Z"):
                 clean += "Z"
             return clean
-        return clean + "T000000Z"
+        return clean
 
 
 def connect_caldav(config):
@@ -159,13 +168,17 @@ def get_calendar(principal, cal_name):
     return target_cal
 
 
-def create_completed_archive(target_cal, summary, original_due, completed_at):
+def create_completed_archive(
+    target_cal, summary, original_due, is_date_only, completed_at
+):
     """Create a standalone COMPLETED VTODO task on the CalDAV calendar."""
     archive_uid = f"archive-{uuid.uuid4()}"
     now_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    completed_str = format_ical_datetime(completed_at)
-    due_str = format_ical_datetime(original_due)
+    completed_str = format_ical_datetime(completed_at, force_date=False)
+    due_val = format_ical_datetime(original_due, force_date=is_date_only)
+
+    due_line = f"DUE;VALUE=DATE:{due_val}" if is_date_only else f"DUE:{due_val}"
 
     vtodo_ics = (
         "BEGIN:VCALENDAR\r\n"
@@ -177,7 +190,7 @@ def create_completed_archive(target_cal, summary, original_due, completed_at):
         f"SUMMARY:{summary}\r\n"
         "STATUS:COMPLETED\r\n"
         f"COMPLETED:{completed_str}\r\n"
-        f"DUE:{due_str}\r\n"
+        f"{due_line}\r\n"
         "END:VTODO\r\n"
         "END:VCALENDAR\r\n"
     )
@@ -203,11 +216,13 @@ def detect_completed_occurrences(target_cal, state):
 
         if uid in state:
             prev_due = state[uid].get("due")
+            prev_is_date_only = state[uid].get("is_date_only", False)
             if prev_due and current_due != prev_due:
                 completions.append(
                     {
                         "summary": info["summary"],
                         "original_due": prev_due,
+                        "is_date_only": prev_is_date_only,
                         "completed_at": info["last_modified"],
                     }
                 )
@@ -226,7 +241,8 @@ def archive_completions(target_cal, completions, dry_run=False):
     for item in completions:
         if dry_run:
             print(
-                f"[DRY-RUN] Would archive: '{item['summary']}' (Due: {item['original_due']})"
+                f"[DRY-RUN] Would archive: '{item['summary']}' "
+                f"(Due: {item['original_due']})"
             )
         else:
             print(f"Archiving completed occurrence: '{item['summary']}'")
@@ -234,6 +250,7 @@ def archive_completions(target_cal, completions, dry_run=False):
                 target_cal=target_cal,
                 summary=item["summary"],
                 original_due=item["original_due"],
+                is_date_only=item.get("is_date_only", False),
                 completed_at=item["completed_at"],
             )
 
