@@ -6,7 +6,8 @@
 import json
 import os
 import sys
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 
 import caldav
 
@@ -32,7 +33,7 @@ def load_state(filepath):
         with open(filepath, "r", encoding="utf-8") as file:
             return json.load(file)
     except json.JSONDecodeError as err:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = f"{filepath}.corrupted_{timestamp}"
         print(f"Fatal error: Could not parse state file '{filepath}': {err}")
 
@@ -82,6 +83,33 @@ def parse_recurring_task(todo):
     }
 
 
+def format_ical_datetime(dt_str):
+    """Format an ISO date or datetime string into a valid iCalendar DATE-TIME string (UTC)."""
+    if not dt_str:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    # If simple DATE (e.g., "2026-08-11"), convert to UTC DATE-TIME at midnight
+    if len(dt_str) == 10 and "T" not in dt_str:
+        return dt_str.replace("-", "") + "T000000Z"
+
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y%m%dT%H%M%SZ")
+    except ValueError:
+        clean = dt_str.replace("-", "").replace(":", "")
+        if "T" in clean:
+            if "+" in clean:
+                clean = clean.split("+")[0]
+            if not clean.endswith("Z"):
+                clean += "Z"
+            return clean
+        return clean + "T000000Z"
+
+
 def connect_caldav(config):
     """Establish connection with the CalDAV server and return the principal."""
     url = config.get("caldav_url")
@@ -110,11 +138,38 @@ def get_calendar(principal, cal_name):
     return target_cal
 
 
-def check_task_completions(target_cal, state):
-    """Scan recurring tasks and detect completed occurrences."""
+def create_completed_archive(target_cal, summary, original_due, completed_at):
+    """Create a standalone COMPLETED VTODO task on the CalDAV calendar."""
+    archive_uid = f"archive-{uuid.uuid4()}"
+    now_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    completed_str = format_ical_datetime(completed_at)
+    due_str = format_ical_datetime(original_due)
+
+    vtodo_ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//CalDAV Task Unroller//EN\r\n"
+        "BEGIN:VTODO\r\n"
+        f"UID:{archive_uid}\r\n"
+        f"DTSTAMP:{now_utc}\r\n"
+        f"SUMMARY:{summary}\r\n"
+        "STATUS:COMPLETED\r\n"
+        f"COMPLETED:{completed_str}\r\n"
+        f"DUE:{due_str}\r\n"
+        "END:VTODO\r\n"
+        "END:VCALENDAR\r\n"
+    )
+
+    target_cal.add_todo(vtodo_ics)
+    print(f"  -> Archived standalone task: '{summary}' (UID: {archive_uid})")
+
+
+def detect_completed_occurrences(target_cal, state):
+    """Scan recurring tasks and return detected completed occurrences."""
     todos = target_cal.todos()
     recurring_count = 0
-    detected_completions = []
+    completions = []
 
     for todo in todos:
         info = parse_recurring_task(todo)
@@ -128,13 +183,11 @@ def check_task_completions(target_cal, state):
         if uid in state:
             prev_due = state[uid].get("due")
             if prev_due and current_due != prev_due:
-                print(f"Detected completed occurrence: '{info['summary']}'")
-                print(f"  Previous DUE: {prev_due} -> New DUE: {current_due}")
-                detected_completions.append(
+                completions.append(
                     {
                         "summary": info["summary"],
-                        "completed_at": info["last_modified"],
                         "original_due": prev_due,
+                        "completed_at": info["last_modified"],
                     }
                 )
 
@@ -142,9 +195,21 @@ def check_task_completions(target_cal, state):
 
     print(
         f"Scanned {len(todos)} items ({recurring_count} recurring). "
-        f"Detected {len(detected_completions)} completed occurrence(s)."
+        f"Detected {len(completions)} completed occurrence(s)."
     )
-    return detected_completions
+    return completions
+
+
+def archive_completions(target_cal, completions):
+    """Push standalone COMPLETED tasks for each detected occurrence."""
+    for item in completions:
+        print(f"Archiving completed occurrence: '{item['summary']}'")
+        create_completed_archive(
+            target_cal=target_cal,
+            summary=item["summary"],
+            original_due=item["original_due"],
+            completed_at=item["completed_at"],
+        )
 
 
 def main():
@@ -166,7 +231,9 @@ def main():
         state = load_state(state_file)
         print(f"Loaded state with {len(state)} tracked tasks.")
 
-        _ = check_task_completions(target_cal, state)
+        completions = detect_completed_occurrences(target_cal, state)
+        if completions:
+            archive_completions(target_cal, completions)
 
         save_state(state_file, state)
         print("Execution completed. State saved.")
