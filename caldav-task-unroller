@@ -52,8 +52,38 @@ def save_state(filepath, state):
         json.dump(state, file, indent=4)
 
 
+def parse_recurring_task(todo):
+    """
+    Extract key attributes from a CalDAV VTODO component if it is recurring.
+
+    Returns dict with task info, or None if the task is not recurring or missing DUE.
+    """
+    vtodo = todo.icalendar_component
+    if not vtodo.get("rrule"):
+        return None
+
+    uid = str(vtodo.get("uid"))
+    summary = str(vtodo.get("summary", "Untitled Task"))
+
+    due_prop = vtodo.get("due")
+    due_str = due_prop.dt.isoformat() if due_prop else None
+
+    last_mod_prop = vtodo.get("last-modified")
+    last_mod_str = last_mod_prop.dt.isoformat() if last_mod_prop else None
+
+    if not due_str:
+        return None
+
+    return {
+        "uid": uid,
+        "summary": summary,
+        "due": due_str,
+        "last_modified": last_mod_str,
+    }
+
+
 def main():
-    """Main execution flow: load config, connect, and manage state."""
+    """Main execution flow: load config, inspect tasks, update state."""
     config = load_config()
 
     url = config.get("caldav_url")
@@ -82,14 +112,42 @@ def main():
 
         print(f"Successfully located calendar: '{target_cal.name}'.")
 
-        # Initialize memory
         state = load_state(state_file)
         print(f"Loaded state with {len(state)} tracked tasks.")
 
-        # TODO: Fetch tasks, compare due dates, and archive completed ones
-        # (This will be the focus of the next commit)
+        todos = target_cal.todos()
+        recurring_count = 0
+        detected_completions = []
 
-        # Persist memory
+        for todo in todos:
+            info = parse_recurring_task(todo)
+            if not info:
+                continue
+
+            recurring_count += 1
+            uid = info["uid"]
+            current_due = info["due"]
+
+            if uid in state:
+                prev_due = state[uid].get("due")
+                if prev_due and current_due != prev_due:
+                    print(f"Detected completed occurrence: '{info['summary']}'")
+                    print(f"  Previous DUE: {prev_due} -> New DUE: {current_due}")
+                    detected_completions.append(
+                        {
+                            "summary": info["summary"],
+                            "completed_at": info["last_modified"],
+                            "original_due": prev_due,
+                        }
+                    )
+
+            state[uid] = info
+
+        print(
+            f"Scanned {len(todos)} items ({recurring_count} recurring). "
+            f"Detected {len(detected_completions)} completed occurrence(s)."
+        )
+
         save_state(state_file, state)
         print("Execution completed. State saved.")
 
