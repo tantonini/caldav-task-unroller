@@ -4,7 +4,9 @@
 # pylint: disable=invalid-name
 
 import json
+import os
 import sys
+from datetime import datetime
 
 import caldav
 
@@ -22,8 +24,36 @@ def load_config(config_path="config.json"):
         sys.exit(1)
 
 
+def load_state(filepath):
+    """Load previous task state from JSON file with crash protection."""
+    if not os.path.exists(filepath):
+        return {}
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except json.JSONDecodeError as err:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{filepath}.corrupted_{timestamp}"
+        print(f"Fatal error: Could not parse state file '{filepath}': {err}")
+
+        try:
+            os.rename(filepath, backup_path)
+            print(f"Backed up corrupted state file to '{backup_path}'.")
+        except OSError as backup_err:
+            print(f"Could not backup corrupted state file: {backup_err}")
+
+        print("Aborting execution to prevent data loss or duplicate archiving.")
+        sys.exit(1)
+
+
+def save_state(filepath, state):
+    """Save the current task state to a JSON file."""
+    with open(filepath, "w", encoding="utf-8") as file:
+        json.dump(state, file, indent=4)
+
+
 def main():
-    """Main execution flow: load config and connect to server."""
+    """Main execution flow: load config, connect, and manage state."""
     config = load_config()
 
     url = config.get("caldav_url")
@@ -39,9 +69,30 @@ def main():
     # pylint: disable=broad-exception-caught
     try:
         client = caldav.DAVClient(url=url, username=user, password=pwd)
-        client.principal()
-        print("Connected to CalDAV server successfully.")
-        print(f"Target calendar: '{cal_name}' | State file: '{state_file}'")
+        principal = client.principal()
+
+        calendars = principal.calendars()
+        target_cal = next((c for c in calendars if c.name == cal_name), None)
+
+        if not target_cal:
+            available = [c.name for c in calendars]
+            print(f"Error: Missing required calendar '{cal_name}'.")
+            print(f"Available calendars on server: {available}")
+            sys.exit(1)
+
+        print(f"Successfully located calendar: '{target_cal.name}'.")
+
+        # Initialize memory
+        state = load_state(state_file)
+        print(f"Loaded state with {len(state)} tracked tasks.")
+
+        # TODO: Fetch tasks, compare due dates, and archive completed ones
+        # (This will be the focus of the next commit)
+
+        # Persist memory
+        save_state(state_file, state)
+        print("Execution completed. State saved.")
+
     except Exception as err:
         print(f"Fatal error: {err}")
         sys.exit(1)
