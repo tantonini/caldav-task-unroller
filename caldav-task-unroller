@@ -101,7 +101,7 @@ def parse_recurring_task(todo):
     if not due_str:
         return None
 
-    # Compare LAST-MODIFIED and DTSTAMP to select the most recent timestamp
+    # Retrieve the most recent modification timestamp
     timestamps = []
     for prop_name in ["last-modified", "dtstamp"]:
         prop = vtodo.get(prop_name)
@@ -129,29 +129,28 @@ def parse_recurring_task(todo):
 
 
 def format_ical_datetime(dt_str, force_date=False):
-    """Format an ISO date or datetime string into a valid iCalendar string."""
+    """Format any date string into a strictly valid iCalendar string (YYYYMMDDTHHMMSSZ)."""
     if not dt_str:
-        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dt = datetime.now(timezone.utc)
+    else:
+        try:
+            # Fix common parsing issue with 'Z' in Python < 3.11
+            clean_str = dt_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_str)
+        except ValueError:
+            dt = datetime.now(timezone.utc)
 
-    if force_date or (len(dt_str) == 10 and "T" not in dt_str):
-        return dt_str.replace("-", "")
+    # Force the datetime to be UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
 
-    try:
-        dt = datetime.fromisoformat(dt_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%Y%m%dT%H%M%SZ")
-    except ValueError:
-        clean = dt_str.replace("-", "").replace(":", "")
-        if "T" in clean:
-            if "+" in clean:
-                clean = clean.split("+")[0]
-            if not clean.endswith("Z"):
-                clean += "Z"
-            return clean
-        return clean
+    # Format strictly without any colons or dashes
+    if force_date:
+        return dt.strftime("%Y%m%d")
+
+    return dt.strftime("%Y%m%dT%H%M%SZ")
 
 
 def connect_caldav(config):
@@ -223,12 +222,22 @@ def create_completed_archive(target_cal, summary, is_date_only, completed_at):
 
 def detect_completed_occurrences(target_cal, state):
     """Scan recurring tasks and return detected completed occurrences."""
-    todos = target_cal.todos()
+    try:
+        todos = target_cal.todos()
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        print(f"Error fetching todos from server: {err}")
+        return []
+
     recurring_count = 0
     completions = []
 
     for todo in todos:
-        info = parse_recurring_task(todo)
+        try:
+            info = parse_recurring_task(todo)
+        except (ValueError, TypeError, KeyError):
+            # Ignore malformed tasks returned by the server
+            continue
+
         if not info:
             continue
 
