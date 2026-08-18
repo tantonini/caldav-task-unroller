@@ -71,7 +71,7 @@ def load_state(filepath):
 def save_state(filepath, state):
     """Save the current task state to a JSON file."""
     with open(filepath, "w", encoding="utf-8") as file:
-        json.dump(state, file, indent=4)
+        json.dump(state, file, indent=4, ensure_ascii=False)
 
 
 def parse_recurring_task(todo):
